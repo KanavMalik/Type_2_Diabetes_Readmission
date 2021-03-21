@@ -1,0 +1,1167 @@
+---
+title: 'Final Project : Impact of HbA1c Measurement on Hospital Readmission Rates: Analysis
+  of 69,973 Clinical Database Patient Records'
+author: "Kanav Malik"
+date: "April 29, 2020"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 6
+    theme: cerulean
+    fig_caption: true
+    highlight: tango 
+---
+---
+<style type="text/css">
+.main-container {
+  max-width: 2500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+---
+
+```{r setup, warning=FALSE ,include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r , Calling libraries, include = FALSE, warning = FALSE}
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(car)
+library(tidyr)
+library(caret)
+library(e1071)
+library(sjPlot)
+library(sjmisc)
+library(sjlabelled)
+library(snakecase)
+library(tibble)
+library(broom)
+library(bestglm)
+library(leaps)
+library(magrittr)
+library(knitr)
+library(vctrs)
+library(pROC)
+library(randomForest)
+library(MASS)
+library(caTools)
+library(kableExtra)
+library(stargazer)
+```
+
+
+```{r , Loading Data, preparing some columns of final data and Making Table 2, echo = FALSE, warning = FALSE}
+
+#Loading data from github
+github_raw <- "https://raw.githubusercontent.com/kanavmalik/Data_Repository/master/diabetic_data.csv"
+prem_data <- read.csv(github_raw)
+
+#Adding "missing" to race and converting it into factor
+prem_data$race <- as.character(prem_data$race)
+prem_data$race[prem_data$race == "?"] <- "Missing"
+prem_data$race <- as.factor(prem_data$race)
+
+#Adding "missing or unknown" to medical_speciality and converting it into factor
+prem_data$medical_specialty <- as.character(prem_data$medical_specialty)
+prem_data$medical_specialty[prem_data$medical_specialty == "?"] <- "Missing or unkown"
+prem_data$medical_specialty <- as.factor(prem_data$medical_specialty)
+
+#Adding "missing" to diag_1 and converting it into factor
+prem_data$diag_1 <- as.character(prem_data$diag_1)
+prem_data$diag_1[prem_data$diag_1 == "?"] <- "Missing"
+prem_data$diag_1 <- as.factor(prem_data$diag_1)
+
+#Excluding discharge disposition id 11,13,14,19,20
+final_data <- prem_data %>% 
+  distinct(patient_nbr, .keep_all = TRUE) %>%
+  filter(discharge_disposition_id != 11) %>%
+  filter(discharge_disposition_id != 14) %>%
+  filter(discharge_disposition_id != 13) %>%
+  filter(discharge_disposition_id != 19) %>%
+  filter(discharge_disposition_id != 20) 
+
+#Added a readmitted_dummy variable to final data
+final_data$readmitted_dummy <- ifelse(final_data$readmitted == "<30", "Yes","No")
+
+#data2table2 is is created to do the count of E-V according to Table 2 in citation paper
+data2table2 <- filter(final_data,diag_1=="E909" | diag_1=="V25" |diag_1=="V26" | diag_1=="V43"|diag_1=="V45" 
+                      | diag_1=="V51" |diag_1=="V53" | diag_1=="V54"|diag_1=="V55" | diag_1=="V56" |diag_1=="V57" 
+                      | diag_1=="V58" |diag_1=="V60" | diag_1=="V63" |diag_1=="V66" | diag_1=="V67"|diag_1=="V70" 
+                      | diag_1=="V71")
+
+#Converting diag_1 to numeric
+final_data$diag_1 <- as.character(final_data$diag_1)
+final_data$diag_1 <- as.numeric(final_data$diag_1)
+
+#Converting the NA's (which came in last step as E-V could not convert to numeric) to 9999
+final_data$diag_1[is.na(final_data$diag_1)] <- 9999 
+
+#Adding Icd9_codes according to diag_1
+final_data$Icd9_codes <-ifelse(final_data$diag_1 >= 390 & final_data$diag_1 <= 459 | final_data$diag_1 == 785  , "390-459,                                                                                                                      785",
+                        ifelse(final_data$diag_1 >= 460 & final_data$diag_1 <= 519 | final_data$diag_1 == 786  , "460-519,                                                                                                                      786",
+                        ifelse(final_data$diag_1 >= 520 & final_data$diag_1 <= 579 | final_data$diag_1 == 787  , "520-579,                                                                                                                     787",        
+                        ifelse(final_data$diag_1 >= 250 & final_data$diag_1 <= 250.99, "250.xx",
+                        ifelse(final_data$diag_1 >= 800 & final_data$diag_1 <= 999 , "800-999",
+                        ifelse(final_data$diag_1 >= 710 & final_data$diag_1 <= 739, "710-739",
+                        ifelse(final_data$diag_1 >= 580 & final_data$diag_1 <= 629 |final_data$diag_1 == 788, "580-629,                                                                                                                      788",
+                        ifelse(final_data$diag_1 >= 140 & final_data$diag_1 <= 239 , "140-239",
+                        ifelse(final_data$diag_1 == 780 |final_data$diag_1  == 781|final_data$diag_1 == 784
+                              |final_data$diag_1 >= 790 & final_data$diag_1<=799, "780, 781, 784, 790-799", 
+                        ifelse(final_data$diag_1 >= 240 & final_data$diag_1 < 250 |final_data$diag_1 >= 251 & 
+                              final_data$diag_1 <= 279 , "240-279, without 250",
+                        ifelse(final_data$diag_1 >= 680 & final_data$diag_1 <= 709 | final_data$diag_1 == 782,"680-709,                                                                                                                      782",
+                        ifelse(final_data$diag_1 >= 1   & final_data$diag_1 <= 139 , "001-139",
+                        ifelse(final_data$diag_1 >= 290 & final_data$diag_1 <= 319,"290-319",
+                        ifelse(final_data$diag_1 >= 280 & final_data$diag_1 <= 289,"280-289",
+                        ifelse(final_data$diag_1 >= 320 & final_data$diag_1 <= 359,"320-359",
+                        ifelse(final_data$diag_1 >= 630 & final_data$diag_1 <= 679,"630-679",
+                        ifelse(final_data$diag_1 >= 360 & final_data$diag_1 <= 389,"360-389",
+                        ifelse(final_data$diag_1 >= 740 & final_data$diag_1 <= 759,"740-759",
+                        ifelse(final_data$diag_1 == 783 | final_data$diag_1 == 789,"783,789",
+                        ifelse(final_data$diag_1 == 9999,"E-V","Unknown"
+                                                          ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) )
+
+#Choosing features for final data
+final_data <- final_data[,c("patient_nbr", "gender", "age","race", "discharge_disposition_id" , "admission_source_id",                                  "time_in_hospital","medical_specialty","diag_1",                                                                           "readmitted","A1Cresult","change","readmitted_dummy","Icd9_codes")]
+
+#data1table 2 is created to do the count of numeric codes according to Table 2 in citation paper
+data1table2 <- final_data %>%
+  filter(diag_1!= "E909") %>% 
+  filter(diag_1!= "V25") %>% 
+  filter(diag_1!= "V26") %>% 
+  filter(diag_1!= "V43") %>% 
+  filter(diag_1!= "V45") %>% 
+  filter(diag_1!= "V51") %>% 
+  filter(diag_1!= "V53") %>% 
+  filter(diag_1!= "V54") %>% 
+  filter(diag_1!= "V55") %>% 
+  filter(diag_1!= "V56") %>% 
+  filter(diag_1!= "V57") %>% 
+  filter(diag_1!= "V58") %>% 
+  filter(diag_1!= "V60") %>% 
+  filter(diag_1!= "V63") %>% 
+  filter(diag_1!= "V66") %>% 
+  filter(diag_1!= "V67") %>% 
+  filter(diag_1!= "V70") %>% 
+  filter(diag_1!= "V71") 
+
+# Adding Group_name feature to data1table2
+data1table2$Group_name <-ifelse(data1table2$diag_1 >= 390 & data1table2$diag_1 <= 459 | data1table2$diag_1 == 785  ,"Cirulatory",
+             ifelse(data1table2$diag_1 >= 460 & data1table2$diag_1 <= 519 | data1table2$diag_1 == 786  , "Respiratory",
+             ifelse(data1table2$diag_1 >= 520 & data1table2$diag_1 <= 579 | data1table2$diag_1 == 787  , "Digestive",
+             ifelse(data1table2$diag_1 >= 250 & data1table2$diag_1 <= 250.99, "Diabetes",
+             ifelse(data1table2$diag_1 >= 800 & data1table2$diag_1 <= 999 , "Injury",
+             ifelse(data1table2$diag_1 >= 710 & data1table2$diag_1 <= 739, "Musculoskeletal",
+             ifelse(data1table2$diag_1 >= 580 & data1table2$diag_1 <= 629 |data1table2$diag_1 == 788, "Genitourinary",
+             ifelse(data1table2$diag_1 >= 140 & data1table2$diag_1 <= 239 , "Neoplasms",
+             ifelse(data1table2$diag_1 == 780 |data1table2$diag_1 == 781|data1table2$diag_1 == 784
+                    |data1table2$diag_1 >= 790 & data1table2$diag_1<=799 |data1table2$diag_1 >= 240 & 
+                     data1table2$diag_1 < 250 |data1table2$diag_1 >= 251 & data1table2$diag_1 <= 279 |
+                     data1table2$diag_1 >= 680 & data1table2$diag_1 <= 709 | data1table2$diag_1 == 782|
+                     data1table2$diag_1 >= 1   & data1table2$diag_1 <= 139 |
+                     data1table2$diag_1 >= 290 & data1table2$diag_1 <= 319|
+                     data1table2$diag_1 >= 280 & data1table2$diag_1 <= 289|
+                     data1table2$diag_1 >= 320 & data1table2$diag_1 <= 359|
+                     data1table2$diag_1 >= 630 & data1table2$diag_1 <= 679|
+                     data1table2$diag_1 >= 360 & data1table2$diag_1 <= 389|
+                     data1table2$diag_1 >= 740 & data1table2$diag_1 <= 759 ,"Other","Unknown"
+                                          ) ) ) ) ) ) ) ) )
+
+#Adding Diagnosis variable (same as Group_name above) in final data)
+final_data$Diagnosis <-ifelse(final_data$diag_1 >= 390 & final_data$diag_1 <= 459 | final_data$diag_1 == 785  ,"Disease of the Cirulatory",
+             ifelse(final_data$diag_1 >= 460 & final_data$diag_1 <= 519 | final_data$diag_1 == 786  , "Respiratory",
+             ifelse(final_data$diag_1 >= 520 & final_data$diag_1 <= 579 | final_data$diag_1 == 787  , "Digestive",
+             ifelse(final_data$diag_1 >= 250 & final_data$diag_1 <= 250.99, "Diabetes",
+             ifelse(final_data$diag_1 >= 800 & final_data$diag_1 <= 999 , "Injury",
+             ifelse(final_data$diag_1 >= 710 & final_data$diag_1 <= 739, "Musculoskeletal",
+             ifelse(final_data$diag_1 >= 580 & final_data$diag_1 <= 629 |final_data$diag_1 == 788, "Genitourinary",
+             ifelse(final_data$diag_1 >= 140 & final_data$diag_1 <= 239 , "Neoplasms",
+             ifelse(final_data$diag_1 == 780 |final_data$diag_1 == 781|final_data$diag_1 == 784
+                    |final_data$diag_1 >= 790 & final_data$diag_1<=799 |final_data$diag_1 >= 240 & 
+                     final_data$diag_1 < 250 |final_data$diag_1 >= 251 & final_data$diag_1 <= 279 |
+                     final_data$diag_1 >= 680 & final_data$diag_1 <= 709 | final_data$diag_1 == 782|
+                     final_data$diag_1 >= 1   & final_data$diag_1 <= 139 |
+                     final_data$diag_1 >= 290 & final_data$diag_1 <= 319|
+                     final_data$diag_1 >= 280 & final_data$diag_1 <= 289|
+                     final_data$diag_1 >= 320 & final_data$diag_1 <= 359|
+                     final_data$diag_1 >= 630 & final_data$diag_1 <= 679|
+                     final_data$diag_1 >= 360 & final_data$diag_1 <= 389|
+                     final_data$diag_1 >= 740 & final_data$diag_1 <= 759 ,"Other","Other"
+                                          ) ) ) ) ) ) ) ) ) 
+
+final_data$Diagnosis = as.factor(final_data$Diagnosis)
+
+# Adding Icd9_codes feature to data1table2
+data1table2$Icd9_codes <-ifelse(data1table2$diag_1 >= 390 & data1table2$diag_1 <= 459 | data1table2$diag_1 == 785  ,"390-459, 785",
+             ifelse(data1table2$diag_1 >= 460 & data1table2$diag_1 <= 519 | data1table2$diag_1 == 786  , "460-519, 786",
+             ifelse(data1table2$diag_1 >= 520 & data1table2$diag_1 <= 579 | data1table2$diag_1 == 787  , "520-579, 787",        
+             ifelse(data1table2$diag_1 >= 250 & data1table2$diag_1 <= 250.99, "250.xx",
+             ifelse(data1table2$diag_1 >= 800 & data1table2$diag_1 <= 999 , "800-999",
+             ifelse(data1table2$diag_1 >= 710 & data1table2$diag_1 <= 739, "710-739",
+             ifelse(data1table2$diag_1 >= 580 & data1table2$diag_1 <= 629 |data1table2$diag_1 == 788, "580-629, 788",
+             ifelse(data1table2$diag_1 >= 140 & data1table2$diag_1 <= 239 , "140-239",
+             ifelse(data1table2$diag_1 == 780 |data1table2$diag_1  == 781|data1table2$diag_1 == 784
+                    |data1table2$diag_1 >= 790 & data1table2$diag_1<=799, "780, 781, 784, 790-799", 
+             ifelse(data1table2$diag_1 >= 240 & data1table2$diag_1 < 250 |data1table2$diag_1 >= 251 & 
+                      data1table2$diag_1 <= 279 , "240-279, without 250",
+             ifelse(data1table2$diag_1 >= 680 & data1table2$diag_1 <= 709 | data1table2$diag_1 == 782,"680-709, 782",
+             ifelse(data1table2$diag_1 >= 1   & data1table2$diag_1 <= 139 , "001-139",
+             ifelse(data1table2$diag_1 >= 290 & data1table2$diag_1 <= 319,"290-319",
+             ifelse(data1table2$diag_1 >= 280 & data1table2$diag_1 <= 289,"280-289",
+             ifelse(data1table2$diag_1 >= 320 & data1table2$diag_1 <= 359,"320-359",
+             ifelse(data1table2$diag_1 >= 630 & data1table2$diag_1 <= 679,"630-679",
+             ifelse(data1table2$diag_1 >= 360 & data1table2$diag_1 <= 389,"360-389",
+             ifelse(data1table2$diag_1 >= 740 & data1table2$diag_1 <= 759,"740-?759",
+             ifelse(data1table2$diag_1 == 783 | data1table2$diag_1 == 789,"783,789","Unknown"
+                                                                     ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) )
+
+#Making a new column Readmitted as 1 if Yes and 0 otherwise
+final_data$Readmitted <- ifelse(final_data$readmitted_dummy == "Yes", 1, 0 )
+
+final_data$gender <- ifelse(final_data$gender=="Male","Male",
+                            ifelse(final_data$gender=="Female","Female","Female"))
+
+# Adding Description feature to data1table2
+data1table2$Description <-ifelse(data1table2$diag_1 >= 390 & data1table2$diag_1 <= 459 | data1table2$diag_1 == 785  ,"Diseases of the circulatory system",
+             ifelse(data1table2$diag_1 >= 460 & data1table2$diag_1 <= 519 | data1table2$diag_1 == 786  , "Diseases of the respiratory system",
+             ifelse(data1table2$diag_1 >= 520 & data1table2$diag_1 <= 579 | data1table2$diag_1 == 787  , "Diseases of the digestive system",        
+             ifelse(data1table2$diag_1 >= 250 & data1table2$diag_1 <= 250.99, "Diabetes mellitus",
+             ifelse(data1table2$diag_1 >= 800 & data1table2$diag_1 <= 999 , "Injury and poisoning",
+             ifelse(data1table2$diag_1 >= 710 & data1table2$diag_1 <= 739, "Diseases of the musculoskeletal system and connective tissue",
+             ifelse(data1table2$diag_1 >= 580 & data1table2$diag_1 <= 629 |data1table2$diag_1 == 788, "Diseases of the genitourinary system",
+             ifelse(data1table2$diag_1 >= 140 & data1table2$diag_1 <= 239 , "Neoplasms",
+             ifelse(data1table2$diag_1 == 780 |data1table2$diag_1 == 781|data1table2$diag_1 == 784
+                   |data1table2$diag_1 >= 790 & data1table2$diag_1<=799, "Other symptoms, signs, and ill-defined conditions", 
+             ifelse(data1table2$diag_1 >= 240 & data1table2$diag_1 < 250 |data1table2$diag_1 >= 251 & 
+                    data1table2$diag_1 <= 279 , "Endocrine,nutritional,metabolic & immunity disorders w/o diabetes",
+             ifelse(data1table2$diag_1 >= 680 & data1table2$diag_1 <= 709 | data1table2$diag_1 == 782,"Diseases of the skin and subcutaneous tissue",
+             ifelse(data1table2$diag_1 >= 1   & data1table2$diag_1 <= 139 , "Infectious and parasitic diseases",
+             ifelse(data1table2$diag_1 >= 290 & data1table2$diag_1 <= 319,"Mental disorders",
+             ifelse(data1table2$diag_1 >= 280 & data1table2$diag_1 <= 289,"Diseases of the blood and blood-forming organs",
+             ifelse(data1table2$diag_1 >= 320 & data1table2$diag_1 <= 359,"Diseases of the nervous system",
+             ifelse(data1table2$diag_1 >= 630 & data1table2$diag_1 <= 679,"Complications of pregnancy, childbirth, and the puerperium",
+             ifelse(data1table2$diag_1 >= 360 & data1table2$diag_1 <= 389,"Diseases of the sense organs",
+             ifelse(data1table2$diag_1 >= 740 & data1table2$diag_1 <= 759,"Congenital anomalies","Unknown"
+                                                                     ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) )
+#Adding description feature to data2table2
+data2table2 <- data2table2 %>%
+               mutate(Icd9_codes="E-V",Group_name="Other",Description="External causes of injury and supplemental                                                                                 classification")
+
+#Creating table2_1 containing count and proportion for numeric diagnosis codes
+table2_1 <- data1table2 %>% 
+          group_by(Group_name,Icd9_codes,Description) %>%
+          summarise(Number_of_encounters=n())
+
+Total <- sum(table2_1$Number_of_encounters) 
+
+table2_1 <-table2_1 %>%          
+mutate(Percentage_of_encounter = round(Number_of_encounters/Total*100,1))
+
+#Creating table2_2 containing  count and proportion for non-numeric diagnosis codes
+table2_2 <- data2table2 %>% 
+  group_by(Group_name,Icd9_codes,Description) %>%
+  summarise(Number_of_encounters=n())
+
+Total_2 <- sum(table2_2$Number_of_encounters) 
+table2_2 <-table2_2 %>%          
+  mutate(Percentage_of_encounter = round(Number_of_encounters/Total*100,1))
+
+```
+
+```{r , HbA1c, echo = FALSE}
+
+final_data$HbA1C <- ifelse(final_data$A1Cresult == "None","No test was performed",
+                    ifelse(final_data$A1Cresult == ">8" & final_data$change == "Ch","Result was high and the diabetic medication was changed",
+                    ifelse(final_data$A1Cresult == ">8" & final_data$change == "No","Result was high but the diabetic medication was not changed", "Normal result of the test")                                    ) ) 
+
+HbA1C <- final_data %>%
+         group_by(HbA1C,readmitted_dummy) %>%
+         summarise(Total=n()) 
+
+HbA1C <- HbA1C %>%
+         group_by(HbA1C) %>%
+         mutate(Number_of_encounters = ifelse(HbA1C=="No test was performed",sum(Total),
+                                ifelse(HbA1C=="	Normal result of the test",sum(Total),
+                                ifelse(HbA1C=="Result was high and the diabetic medication was changed"
+                                       ,sum(Total),sum(Total)     
+                                       )))) %>%
+         mutate(No_of_encounters = ifelse(HbA1C=="No test was performed" & readmitted_dummy=="Yes",
+                                    Total,ifelse(HbA1C=="Normal result of the test" & readmitted_dummy=="Yes",
+                                    Total,ifelse(HbA1C=="Result was high and the diabetic medication was changed" & readmitted_dummy=="Yes",Total,
+                             ifelse(HbA1C=="Result was high but the diabetic medication was not changed" &  readmitted_dummy=="Yes",Total,0
+                                                                    )))))
+
+HbA1C <- HbA1C %>%
+         filter(readmitted_dummy=="Yes")
+
+Total_population <- sum(HbA1C$Number_of_encounters)
+
+HbA1C <- HbA1C %>%         
+         mutate(Percentage_of_population = round(Number_of_encounters/Total_population*100,1)) %>%
+         mutate(Percentage_in_group = round(No_of_encounters/Number_of_encounters*100,1))
+
+HbA1C <- HbA1C[,c("HbA1C","Number_of_encounters","Percentage_of_population","No_of_encounters","Percentage_in_group")]
+
+#Resetting naming of HbA1C to a shorter naming for regression modeling
+final_data$HbA1C <- ifelse(final_data$A1Cresult == ">8" & final_data$change == "Ch","Result High,changed",
+                           ifelse(final_data$A1Cresult == "None"," Was not measured",
+                    ifelse(final_data$A1Cresult == ">8" & final_data$change == "No","Result High,not changed", "Normal result")  ) ) 
+
+final_data$HbA1C = as.factor(final_data$HbA1C)
+
+```
+
+```{r , Gender,echo = FALSE}
+
+Gender <- final_data %>%
+  group_by(gender,readmitted_dummy) %>%
+  summarise(Total=n()) 
+
+final_data$gender = as.factor(final_data$gender)
+
+Gender <- Gender %>%
+  group_by(gender) %>%
+  mutate(Number_of_encounters = ifelse(gender=="Female",sum(Total),
+                                       ifelse(gender=="Male",sum(Total),sum(Total)     
+                                       ))) %>%
+  mutate(No_of_encounters = ifelse(gender=="Female" & readmitted_dummy=="Yes",
+                             Total,ifelse(gender=="Male" & readmitted_dummy=="Yes",
+                                          Total,Total
+                             )))
+
+Gender <- Gender %>%
+  filter(readmitted_dummy=="Yes")
+
+Total_population <- sum(HbA1C$Number_of_encounters)
+
+
+Gender <- Gender %>%         
+  mutate(Percentage_of_population = round(Number_of_encounters/Total_population*100,1)) %>%
+  mutate(Percentage_in_group = round(No_of_encounters/Number_of_encounters*100,1))
+
+Gender <- Gender[,c("gender","Number_of_encounters","Percentage_of_population","No_of_encounters","Percentage_in_group")]
+  
+```
+
+```{r , Discharge disposition, echo = FALSE}
+final_data <- final_data %>%
+               mutate(Discharge_disposition = ifelse(discharge_disposition_id==1,"Discharged to home","Otherwise")) %>%
+               mutate(Discharge = ifelse(discharge_disposition_id==1,"Home","Other"))
+
+final_data$Discharge = as.factor(final_data$Discharge)  
+
+Discharge_disposition <- final_data %>%
+  group_by(Discharge_disposition,readmitted_dummy) %>%
+  summarise(Total=n())
+
+Discharge_disposition <- Discharge_disposition %>%
+  group_by(Discharge_disposition) %>%
+  mutate(Number_of_encounters = ifelse(Discharge_disposition=="Discharged to home",sum(Total),
+                                       sum(Total)     
+                                                 )) 
+
+Discharge_disposition <- Discharge_disposition %>%
+  group_by(Discharge_disposition)%>%
+  mutate(No_of_encounters = ifelse(Discharge_disposition== "Discharged to home" & readmitted_dummy=="Yes", Total,
+                             ifelse(Discharge_disposition== "Otherwise" & readmitted_dummy=="Yes", Total,        
+                                    Total )))
+
+Discharge_disposition <- Discharge_disposition %>%
+  filter(readmitted_dummy=="Yes")
+
+Total_population <- sum(Discharge_disposition$Number_of_encounters)
+
+
+Discharge_disposition <- Discharge_disposition %>%         
+  mutate(Percentage_of_population = round(Number_of_encounters/Total_population*100,1)) %>%
+  mutate(Percentage_in_group = round(No_of_encounters/Number_of_encounters*100,1))
+
+Discharge_disposition <-Discharge_disposition[,c("Discharge_disposition","Number_of_encounters","Percentage_of_population","No_of_encounters","Percentage_in_group")]
+
+```
+
+```{r , Admission Source, echo = FALSE}
+final_data <- final_data %>%
+  mutate(Admission_source = ifelse(admission_source_id==1 | admission_source_id==2,"Admitted because of physician/clinic referral",
+                            ifelse(admission_source_id==7,"Admitted from emergency room","Otherwise"))) %>%
+  mutate(Admission = ifelse(admission_source_id==1 | admission_source_id==2,"referral",
+                     ifelse(admission_source_id==7,"Emergency","Other"))) 
+
+final_data$Admission = as.factor(final_data$Admission)  
+
+Admission_source <- final_data %>%
+  group_by(Admission_source,readmitted_dummy) %>%
+  summarise(Total=n())
+
+Admission_source <- Admission_source %>%
+  group_by(Admission_source) %>%
+  mutate(Number_of_encounters = ifelse(Admission_source=="Admitted because of physician/clinic referral",sum(Total),
+                                ifelse(Admission_source=="Admitted from emergency room",sum(Total),       
+                                       sum(Total)))) 
+
+Admission_source <- Admission_source %>%
+  group_by(Admission_source)%>%
+  mutate(No_of_encounters = ifelse(Admission_source== "Admitted because of physician/clinic referral" & readmitted_dummy=="Yes", Total,
+                      ifelse(Admission_source== "Admitted from emergency room" & readmitted_dummy=="Yes", Total,        
+                      ifelse(Admission_source== "Otherwise" & readmitted_dummy=="Yes", Total,Total ))))
+
+Admission_source <- Admission_source %>%
+  filter(readmitted_dummy=="Yes")
+
+Total_population <- sum(Admission_source$Number_of_encounters)
+
+Admission_source <- Admission_source %>%         
+  mutate(Percentage_of_population = round(Number_of_encounters/Total_population*100,1)) %>%
+  mutate(Percentage_in_group = round(No_of_encounters/Number_of_encounters*100,1))
+
+Admission_source <-Admission_source[,c("Admission_source","Number_of_encounters","Percentage_of_population","No_of_encounters","Percentage_in_group")]    
+
+```
+
+```{r , Medical Speciality, echo = FALSE}
+
+final_data <- final_data %>%
+  mutate(Speciality_of_admitting_physician = ifelse(medical_specialty=="InternalMedicine","Internal Medicine",
+         ifelse(medical_specialty=="Cardiology","Cardiology",
+         ifelse(medical_specialty=="Family/GeneralPractice","Family/general practice",
+         ifelse(medical_specialty == "Surgeon"|
+                medical_specialty == "Surgery-Cardiovascular"|
+                medical_specialty == "Surgery-Cardiovascular/Thoracic"|
+                medical_specialty == "Surgery-Colon&Rectal"|
+                medical_specialty == "Surgery-General"|
+                medical_specialty == "Surgery-Maxillofacial"|
+                medical_specialty == "Surgery-Neuro"|
+                medical_specialty == "Surgery-Pediatric"|
+                medical_specialty == "Surgery-Plastic"|
+                medical_specialty == "Surgery-PlasticwithinHeadandNeck"|
+                medical_specialty == "Surgery-Thoracic"|
+                medical_specialty == "Surgery-Vascular","Surgery",
+         ifelse(medical_specialty=="Missing or unkown","Missing or unknown","Other"))))))%>%
+  mutate(Medical_speciality = ifelse(medical_specialty=="InternalMedicine","Internal Medicine",
+         ifelse(medical_specialty=="Cardiology","Cardiology",
+         ifelse(medical_specialty=="Family/GeneralPractice","General practice",
+         ifelse(medical_specialty == "Surgeon"|
+                medical_specialty == "Surgery-Cardiovascular"|
+                medical_specialty == "Surgery-Cardiovascular/Thoracic"|
+                medical_specialty == "Surgery-Colon&Rectal"|
+                medical_specialty == "Surgery-General"|
+                medical_specialty == "Surgery-Maxillofacial"|
+                medical_specialty == "Surgery-Neuro"|
+                medical_specialty == "Surgery-Pediatric"|
+                medical_specialty == "Surgery-Plastic"|
+                medical_specialty == "Surgery-PlasticwithinHeadandNeck"|
+                medical_specialty == "Surgery-Thoracic"|
+                medical_specialty == "Surgery-Vascular","Surgery",
+         ifelse(medical_specialty=="Missing or unkown","Missing","Other"))))))
+
+final_data$Medical_speciality = as.factor(final_data$Medical_speciality)
+
+Speciality_of_admitting_physician <- final_data %>%
+  group_by(Speciality_of_admitting_physician,readmitted_dummy) %>%
+  summarise(Total=n())
+
+Speciality_of_admitting_physician <- Speciality_of_admitting_physician %>%
+  group_by(Speciality_of_admitting_physician) %>%
+  mutate(Number_of_encounters = ifelse(Speciality_of_admitting_physician=="Internal Medicine",sum(Total),
+                                       ifelse(Speciality_of_admitting_physician=="Cardiology",sum(Total),
+                                       ifelse(Speciality_of_admitting_physician=="Family/general practice",sum(Total),
+                                       ifelse(Speciality_of_admitting_physician=="Surgery",sum(Total),
+                                       ifelse(Speciality_of_admitting_physician=="Missing or unknown",sum(Total),
+                                       ifelse(Speciality_of_admitting_physician=="Other",sum(Total)      
+                                              ,sum(Total,sum(Total)))))))) )
+
+Speciality_of_admitting_physician <- Speciality_of_admitting_physician %>%
+  group_by(Speciality_of_admitting_physician)%>%
+  mutate(No_of_encounters = ifelse(Speciality_of_admitting_physician== "Cardiology" & readmitted_dummy=="Yes", Total,
+                      ifelse(Speciality_of_admitting_physician== "	Family/general practice" & readmitted_dummy=="Yes",                                 Total,        
+                      ifelse(Speciality_of_admitting_physician== "Internal Medicine" & readmitted_dummy=="Yes",Total,
+                      ifelse(Speciality_of_admitting_physician== "Surgery" & readmitted_dummy=="Yes", Total,
+                      ifelse(Speciality_of_admitting_physician=="Missing or unkown" & readmitted_dummy=="Yes",Total,   
+                      ifelse(Speciality_of_admitting_physician== "Other"& readmitted_dummy=="Yes",Total,Total)
+                      ))))))
+         
+
+Speciality_of_admitting_physician <- Speciality_of_admitting_physician %>%
+  filter(readmitted_dummy=="Yes")
+
+Total_population <- sum(Speciality_of_admitting_physician$Number_of_encounters)
+
+
+Speciality_of_admitting_physician <- Speciality_of_admitting_physician %>%         
+  mutate(Percentage_of_population = round(Number_of_encounters/Total_population*100,1)) %>%
+  mutate(Percentage_in_group = round(No_of_encounters/Number_of_encounters*100,1))
+  
+Speciality_of_admitting_physician<-Speciality_of_admitting_physician[,c("Speciality_of_admitting_physician","Number_of_encounters","Percentage_of_population","No_of_encounters","Percentage_in_group")] 
+
+```
+
+```{r , Primary diagnosis, echo = FALSE}
+
+final_data <- final_data %>%
+  mutate(Primary_diagnosis = ifelse(Icd9_codes=="390-?459, 785","A disease of the circulatory system (icd9: 390-459, 785)",
+                             ifelse(Icd9_codes=="250.xx","Diabetes (icd9: 250.xx)",
+                             ifelse(Icd9_codes=="460-519, 786","A disease of the respiratory system (icd9: 460-519, 786)",
+                             ifelse(Icd9_codes== "520-579, 787","Diseases of the digestive system (icd9: 520-579, 787)",
+                             ifelse(Icd9_codes=="800-999","Injury and poisoning (icd9: 800-999)",
+                             ifelse(Icd9_codes=="710-739","Diseases of the musculoskeletal system and connective tissue (icd9: 710–739)",        
+                             ifelse(Icd9_codes=="580-629, 788","Diseases of the genitourinary system (icd9: 580-629, 788)",
+                             ifelse(Icd9_codes=="140-239","Neoplasms (icd9: 140-239)",
+                             ifelse(Icd9_codes=="Unknown","Other","Other" )
+                                                                          )))))))))        
+
+final_data1 <- data1table2 %>%
+  mutate(Primary_diagnosis = ifelse(Icd9_codes=="390-459, 785","A disease of the circulatory system (icd9: 390-459, 785)",
+                             ifelse(Icd9_codes=="250.xx","Diabetes (icd9: 250.xx)",
+                             ifelse(Icd9_codes=="460-519, 786","A disease of the respiratory system (icd9: 460-519, 786)",
+                             ifelse(Icd9_codes== "520-579, 787","Diseases of the digestive system (icd9: 520-579, 787)",
+                             ifelse(Icd9_codes=="800-999","Injury and poisoning (icd9: 800–999)",
+                             ifelse(Icd9_codes=="710-739","Diseases of the musculoskeletal system and connective tissue (icd9: 710-739)",        
+                             ifelse(Icd9_codes=="580-629, 788","Diseases of the genitourinary system (icd9: 580-629, 788)",
+                             ifelse(Icd9_codes=="140-239","Neoplasms (icd9: 140-239)",
+                             ifelse(Icd9_codes=="Unknown","Other","Other" )
+                                                                          )))))))))        
+
+Primary_diagnosis_1 <- final_data1 %>%
+                       group_by(Primary_diagnosis,readmitted_dummy) %>%
+                       summarise(Total=n())
+
+final_data2 <- data2table2 %>%
+               mutate(Primary_diagnosis =ifelse(A1Cresult=="E-V","Other(icd9: E-V)","Other(icd9: E-V)"))
+
+Primary_diagnosis_2 <- final_data2 %>%
+  group_by(Primary_diagnosis,readmitted_dummy) %>%
+  summarise(Total=n())
+
+Primary_diagnosis <-rbind(Primary_diagnosis_1,Primary_diagnosis_2)
+
+Primary_diagnosis <- Primary_diagnosis %>%
+                     group_by(Primary_diagnosis) %>%
+  mutate(Number_of_encounters = ifelse(Primary_diagnosis=="A disease of the circulatory system (icd9: 390-459, 785)",sum(Total),
+                                ifelse(Primary_diagnosis=="Diabetes (icd9: 250.xx)",sum(Total),
+                                ifelse(Primary_diagnosis=="A disease of the respiratory system (icd9: 460-519, 786",sum(Total),
+                                ifelse(Primary_diagnosis=="Diseases of the digestive system (icd9: 520-579, 787)",sum(Total),
+                                ifelse(Primary_diagnosis=="Injury and poisoning (icd9: 800-999)",sum(Total),
+                                ifelse(Primary_diagnosis=="Diseases of the musculoskeletal system and connective tissue (icd9: 710-739)",sum(Total),
+                                ifelse(Primary_diagnosis=="Diseases of the genitourinary system (icd9: 580-629, 788)",sum(Total),
+                                ifelse(Primary_diagnosis=="Neoplasms (icd9: 140-239)",sum(Total),
+                                ifelse(Primary_diagnosis=="Other",sum(Total),sum(Total)))))))))))
+
+Primary_diagnosis <- Primary_diagnosis %>%
+  group_by(Primary_diagnosis)%>%
+  mutate(No_of_encounters = ifelse(Primary_diagnosis== "A disease of the circulatory system (icd9: 390-459, 785)" & readmitted_dummy=="Yes", Total,
+                      ifelse(Primary_diagnosis== "Diabetes (icd9: 250.xx)" & readmitted_dummy=="Yes", Total,        
+                      ifelse(Primary_diagnosis== "A disease of the respiratory system (icd9: 460-519, 786)" & readmitted_dummy=="Yes",Total,
+                      ifelse(Primary_diagnosis== "Diseases of the digestive system (icd9: 520-579, 787)" & readmitted_dummy=="Yes", Total,
+                      ifelse(Primary_diagnosis=="Injury and poisoning (icd9: 800-999)" & readmitted_dummy=="Yes",Total,   
+                      ifelse(Primary_diagnosis== "Diseases of the musculoskeletal system and connective tissue (icd9: 710-739)"& readmitted_dummy=="Yes",Total,
+                      ifelse(Primary_diagnosis== "Diseases of the genitourinary system (icd9: 580-629, 788)" & readmitted_dummy=="Yes",Total,
+                      ifelse(Primary_diagnosis== "Neoplasms (icd9: 140-239)"& readmitted_dummy=="Yes",Total,
+                      ifelse(Primary_diagnosis== "Other" & readmitted_dummy== "Yes",Total,
+                      ifelse(Primary_diagnosis=="Other(icd9: E-V)" & readmitted_dummy=="Yes",Total,Total
+                                )))))))))))
+
+Primary_diagnosis <- Primary_diagnosis %>%
+  filter(readmitted_dummy=="Yes")
+
+Total_population <- sum(Primary_diagnosis$Number_of_encounters)
+
+
+Primary_diagnosis <- Primary_diagnosis %>%         
+  mutate(Percentage_of_population = round(Number_of_encounters/Total_population*100,1)) %>%
+  mutate(Percentage_in_group = round(No_of_encounters/Number_of_encounters*100,1))
+
+Primary_diagnosis<- Primary_diagnosis[,c("Primary_diagnosis","Number_of_encounters","Percentage_of_population","No_of_encounters","Percentage_in_group")] 
+
+```
+
+```{r , Race, echo = FALSE}
+
+final_data <- final_data %>%
+              mutate(Race=ifelse(race=="AfricanAmerican","African American",
+                    ifelse(race=="Caucasian","Caucasian",
+                    ifelse(race=="Missing","Missing","Other"))))
+
+final_data$Race =as.factor(final_data$Race)
+
+Race <- final_data %>%
+  group_by(Race,readmitted_dummy) %>%
+  summarise(Total=n())%>%
+  mutate(Number_of_encounters = ifelse(Race=="African American",sum(Total),
+                                       ifelse(Race=="Caucasian",sum(Total),
+                                       ifelse(Race=="Missing",sum(Total),
+                                       ifelse(Race=="Other",sum(Total),
+                                                                 sum(Total))))))
+
+Race <- Race[,c("Race","Number_of_encounters","readmitted_dummy","Total")]
+
+Race <- Race %>%
+  group_by(Race)%>%
+  mutate(No_of_encounters = ifelse(Race=="African American" & readmitted_dummy=="Yes", Total,
+                      ifelse(Race=="Caucasian" & readmitted_dummy=="Yes", Total, 
+                      ifelse(Race=="Missing" & readmitted_dummy=="Yes", Total, 
+                      ifelse(Race== "Other" & readmitted_dummy=="Yes", Total,Total )))))
+
+Race <- Race %>%
+  filter(readmitted_dummy=="Yes")
+
+Total_population <- sum(Race$Number_of_encounters)
+
+
+Race <- Race %>%         
+  mutate(Percentage_of_population = round(Number_of_encounters/Total_population*100,1)) %>%
+  mutate(Percentage_in_group = round(No_of_encounters/Number_of_encounters*100,1))
+
+Race <-Race[,c("Race","Number_of_encounters","Percentage_of_population","No_of_encounters","Percentage_in_group")]  
+
+```
+
+```{r , Age, echo = FALSE}
+
+final_data <- final_data %>%
+  mutate(Age=ifelse(age=="[0-10)"| age=="[10-20)"|age=="[20-30)","30 years old or younger",
+             ifelse(age=="[30-40)"|age=="[40-50)"|age=="[50-60)","30-60 years old",
+             ifelse(age=="[60-70)"|age=="[70-80)"|age=="[80-90)"|age=="[80-90)"|age=="[90-100)","Older than 60","Other")
+                                                                                                                       )))
+final_data$Age = as.factor(final_data$Age)
+
+Age <- final_data %>%
+  group_by(Age,readmitted_dummy) %>%
+  summarise(Total=n())%>%
+  mutate(Number_of_encounters = ifelse(Age=="30 years old or younger",sum(Total),
+                                ifelse(Age=="30-60 years old",sum(Total),
+                                ifelse(Age=="Older than 60",sum(Total),sum(Total)))))
+
+Age <- Age %>%
+  group_by(Age)%>%
+  mutate(No_of_encounters = ifelse(Age=="30 years old or younger" & readmitted_dummy=="Yes", Total,
+                      ifelse(Age=="30-60 years old" & readmitted_dummy=="Yes", Total, 
+                      ifelse(Age=="Older than 60" & readmitted_dummy=="Yes", Total,Total))))
+
+Age <- Age %>%
+  filter(readmitted_dummy=="Yes")
+
+Total_population <- sum(Age$Number_of_encounters)
+
+
+Age <- Age %>%         
+  mutate(Percentage_of_population = round(Number_of_encounters/Total_population*100,1)) %>%
+  mutate(Percentage_in_group = round(No_of_encounters/Number_of_encounters*100,1))
+
+Age <-Age[,c("Age","Number_of_encounters","Percentage_of_population","No_of_encounters","Percentage_in_group")]    
+
+#Changing Age variable to different naming (so that logistic regression uses [30,60) )
+final_data <- final_data %>%
+  mutate(Age=ifelse(age=="[0-10)"| age=="[10-20)"|age=="[20-30)","<30",
+             ifelse(age=="[30-40)"|age=="[40-50)"|age=="[50-60)","[30,60)",
+             ifelse(age=="[60-70)"|age=="[70-80)"|age=="[80-90)"|age=="[80-90)"|age=="[90-100)","[60,100)","Other")
+                                                                                                                  )))
+final_data$Age = as.factor(final_data$Age)
+
+
+```
+
+```{r , Age in years, echo = FALSE}
+
+final_data$Age_in_years <- ifelse(final_data$age == "[0-10)",5,
+                           ifelse(final_data$age == "[10-20)",15,
+                           ifelse(final_data$age == "[20-30)",25,
+                           ifelse(final_data$age == "[30-40)",35,
+                           ifelse(final_data$age == "[40-50)",45,
+                           ifelse(final_data$age == "[50-60)",55,
+                           ifelse(final_data$age == "[60-70)",65,
+                           ifelse(final_data$age == "[70-80)",75,
+                           ifelse(final_data$age == "[80-90)",85,
+                           ifelse(final_data$age == "[90-100)",95, "Missing"))))))))))
+
+final_data$Age_in_years <- as.numeric(final_data$Age_in_years)
+
+Age_in_years <- final_data %>%
+                mutate(Age_numeric = "Age in years") %>%
+                mutate(mean = round(mean(Age_in_years),1)) %>%
+                mutate(median = quantile(Age_in_years, prob = 0.50)) %>%
+                mutate(First_quartile = quantile(Age_in_years, prob = 0.25)) %>%
+                mutate(Third_quartile = quantile(Age_in_years, prob = 0.75))
+
+Age_in_years <- Age_in_years[1, c("Age_numeric","mean","median","First_quartile","Third_quartile")]
+
+```
+
+```{r , time in hospital , echo = FALSE}
+
+Time_in_hospital <- final_data %>%
+                    mutate(Time_in_hospital = "Days between admission & discharge(1 to 14)") %>%
+                    mutate(mean = round(mean(time_in_hospital),1)) %>%
+                    mutate(median = quantile(time_in_hospital, prob = 0.50)) %>%
+                    mutate(First_quartile = quantile(time_in_hospital, prob = 0.25)) %>%
+                    mutate(Third_quartile = quantile(time_in_hospital, prob = 0.75))
+
+Time_in_hospital <- Time_in_hospital[1, c("Time_in_hospital","mean","median","First_quartile","Third_quartile")]
+
+```
+
+```{r set-options, echo=FALSE,cache=FALSE}
+options(width = 80)
+```
+
+```{r,Choosing features for final data,echo=FALSE}
+
+final_data <- final_data[c("gender","Race","Age","Diagnosis","Admission","Discharge","Medical_speciality","HbA1C","time_in_hospital","Readmitted")]
+```
+
+# Introduction
+
+A final dataset of 69,973 observations and 10 dimensions is prepared for final analysis regarding the effect of HbA1C treatment on Readmission rates in diabetic patients.These consist of 9 potential explanatory variables namely gender,Race,Age,Diagnosis,Admissiom,Discharge, Medical_speciality,HbA1C,time_in_hospital and one response variable Readmitted 
+
+The report will compare models based on 3 approaches :
+
+* Logistic regression model obtained following the inclusion instructions in the citation paper
+
+* Logistic regression model made using my own model building strategy
+
+* Random forest model
+
+# Test/Train Split(70/30 ratio)
+
+The data is divided into 70% train data (48,106 observations) and 30% test data(21,867 observations)
+
+The train data will be used for model building.The train data will be used for variable selection and calculating the parameter estimates of chosen variables 
+
+The test data will be used for model validation. This will be done by doing predictions for readmission on the test data. Then the validity of the model will be assessed by comparing the true values of readmission with the predicted values of readmissions to plot an area under curve and confusion matrix. Various statistics such as accuracy,sensitivity,specificity,Youden Index,Detection rate etc will be computed for each model. Youden Index will be used as the primary statistic to compare the models
+
+```{r,Split,echo=FALSE}
+
+set.seed(123)
+sample <- sample.split(final_data, SplitRatio = 0.7)
+train <- subset(final_data, sample == TRUE)
+test <- subset(final_data, sample == FALSE)
+
+```
+
+# Final Model as per citation paper
+
+The following chunk of code was used to build the final model as per the citation paper:
+
+```{r, Final Model, echo=TRUE}
+
+model_final_paper <- glm(Readmitted ~ Discharge + Race + Admission + Medical_speciality + time_in_hospital + Age + Diagnosis + HbA1C+ Discharge * Race + Discharge * Medical_speciality + Discharge * time_in_hospital + Discharge * Diagnosis + Medical_speciality * time_in_hospital + Medical_speciality * Age  + Medical_speciality * Diagnosis + Admission * Age+  time_in_hospital * Diagnosis + Diagnosis * HbA1C, data = train, family = binomial)
+
+```
+
+## Table 4 and 5(combined)
+
+```{r,Tabel_4_5_paper,echo=FALSE}
+
+tab_model(model_final_paper,transform=NULL,auto.label = F,show.ci = F) 
+
+```
+
+## Cut-off to be used for each class
+
+Next we will check the cut-off values to be used based on the mean of each class
+
+The following result is obtained :
+
+```{r,echo=FALSE}
+x<- predict(model_final_paper,type="response")
+summary(x)
+```
+
+A cut-off value of 0.09 is used for class 1 and 0.91 is used for class 0 based on the predicted means above for each class
+
+## Model Validation
+
+### Plotting Area Under curve
+
+```{r,AUC_paper,echo=FALSE}
+
+predicted_readmission_rate <- model_final_paper %>%
+                              augment(type.predict = "response", newdata = test) %>%
+                              mutate(predicted = ifelse(.fitted > 0.09,1,0))
+
+roc <- roc(predicted_readmission_rate$predicted,test$Readmitted)
+auc(roc) 
+plot(roc)
+
+```
+
+**Note : A cut-off value of 0.09 has been used above, as the proportion of readmissions in the train data is around 9%**
+
+The AUC is 52.25%
+
+### Confusion matrix
+
+```{r,Matrix paper,echo=TRUE}
+
+confusion_matrix <- table(predicted_readmission_rate$predicted,test$Readmitted)
+confusionMatrix(confusion_matrix,positive = "1")
+
+```
+
+The Accuracy is 56.81% whereas the Yuden Index is 0.134
+
+The Sensitivity and Specificity are little imbalanced. The Youden Index is very low
+
+The model has predicted False positives for 8,275 observations and False negatives for 790 observations 
+
+Out of the 20,991 observations in test data, 56.81% of the observations have been predicted correctly as being Readmitted or not
+
+Specificity measures the proportion of actual negatives that are predicted as negative.The Specificity is 56.79%.This means that the model has true negative rate equal to 0.5679
+
+Sensitivity measures the proportion of actual positives that are predicted as positive.The Sensitivity is 57.09%.This means that the model has true positive rate equal to 0.5709
+
+Youden Index measures the combined effect of true positive rate(Sensitivity) and true negative rate(Specificity). As seen above, 0.134 on a scale of 0 to 1 is quite low
+
+Overall, it is concluded that the odds of predicting readmission for this model is low
+
+# Building a regression model using my own model building strategy
+
+A final model was tested using both AIC and BIC approach initially, The model made using AIC approach was quite similar to the model made in the citation paper. The model made using BIC approach outperformed the model made using AIC approach.  The model using AIC approach has not been included in the report though it has been included in the R code provided separately. Below are the steps to arrive at the final logistic regression model using the BIC approach :
+
+* Best subset selection using BIC criteria will be used to choose the explanatory variables which are important.HbA1C will be excluded from the best subset selection 
+
+* A model will be fitted including the selected explanatory variables from above step,HbA1C and their interactions. Type II chi-square test will be used to decide which interactions are important
+
+* A final model will be made keeping all the significant variables and interactions
+
+## Best subset selection (AIC)
+```{r,echo=FALSE}
+
+diabetes.for.bestglm_AIC <- within(train, {
+  y <- Readmitted
+})
+
+diabetes.for.bestglm_AIC <-
+  diabetes.for.bestglm_AIC[, c("gender","Race","Age","Discharge","Admission","time_in_hospital","Medical_speciality","Diagnosis",
+                           "y")]
+
+res.bestglm_AIC <- bestglm(diabetes.for.bestglm_AIC, family = binomial, IC = "AIC", t = "default",CVArgs = "default", qLevel = 0.99, TopModels = 5,method = "exhaustive", intercept = TRUE, weights = NULL,nvmax = "default", RequireFullEnumerationQ = FALSE)
+
+```
+
+### Table 4
+```{r,echo=FALSE}
+
+tab_model(res.bestglm_AIC$BestModel,transform=NULL,show.ci = F,auto.label = F) 
+
+```
+
+It can be seen that Gender has been removed from the best model using the AIC criteria
+
+
+### Including the interactions
+
+```{r,echo=FALSE}
+
+model_interactions <- glm(Readmitted ~ Discharge + Admission + Medical_speciality + time_in_hospital + Age + Diagnosis + HbA1C + Discharge * Admission + Discharge * Medical_speciality + Discharge * time_in_hospital + Discharge * Age + Discharge * Diagnosis + Admission * Medical_speciality + Admission * time_in_hospital + Admission * Age + Admission * Diagnosis + Medical_speciality * time_in_hospital + Medical_speciality * Age + Medical_speciality * Diagnosis + time_in_hospital * Age + time_in_hospital * Age + time_in_hospital * Diagnosis + Age * Diagnosis + Discharge * HbA1C + Admission * HbA1C + Medical_speciality * HbA1C + time_in_hospital * HbA1C + Age * HbA1C + Diagnosis * HbA1C+ Race * Discharge +Race *Admission + Race * Medical_speciality + Race * time_in_hospital + Race * Age + Race * Diagnosis + Race * HbA1C , data = train, family = binomial)
+
+```
+
+### Table 4 & 5 (combined)
+```{r,echo=FALSE}
+
+tab_model(model_interactions,transform=NULL,show.ci = F,auto.label = F) 
+
+```
+
+#### Type II Chi-Square Test
+
+```{r,echo=false}
+Anova(model_interactions)
+
+```
+
+### Model including selected interactions
+
+```{r,echo=FALSE}
+
+model_final_interactions <- glm(Readmitted ~ Discharge + Admission + Medical_speciality + time_in_hospital + Age + Diagnosis + HbA1C + Discharge * Medical_speciality + Discharge * time_in_hospital + Discharge * Age + Admission * Age + Admission * Diagnosis + Medical_speciality * Diagnosis + time_in_hospital * Diagnosis + Medical_speciality * HbA1C , data = train, family = binomial)
+
+ summary(model_final_interactions)
+```
+
+#### Type II Chi-Square Test
+```{r,echo=FALSE}
+Anova(model_final_interactions)
+```
+
+### Final Model using AIC approach initially
+
+```{r,echo=FALSE}
+
+Model_Final <- glm(Readmitted ~ Discharge + Admission + Medical_speciality + time_in_hospital + Age + Diagnosis + HbA1C + Discharge * Medical_speciality + Discharge * time_in_hospital + Discharge * Age + Admission * Age + Admission * Diagnosis + Medical_speciality * Diagnosis + time_in_hospital * Diagnosis , data = train, family = binomial)
+
+ summary(Model_Final)
+```
+
+#### Type II Chi-Square Test
+```{r,echo=FALSE}
+Anova(Model_Final)
+```
+
+### Model Validation
+
+#### Plotting Area Under curve
+
+```{r,echo=FALSE}
+
+predicted_readmission_rate_AIC <- Model_Final %>%
+                                    augment(type.predict = "response", newdata = test) %>%
+                                    mutate(predicted = ifelse(.fitted > 0.08,1,0))
+
+roc <- roc(predicted_readmission_rate_AIC$predicted,test$Readmitted)
+auc(roc) 
+plot(roc)
+
+```
+
+#### Confusion matrix
+```{r,Matrix,echo=TRUE}
+
+confusion_matrix_AIC <- table(predicted_readmission_rate_AIC$predicted,test$Readmitted)
+confusionMatrix(confusion_matrix_AIC,positive = "1")
+
+```
+
+Model using AIC criteria is not shown in the report
+
+## Best subset selection (BIC)
+
+```{r,echo=FALSE}
+
+diabetes.for.bestglm_BIC <- within(train, {
+  y <- Readmitted
+})
+
+diabetes.for.bestglm_BIC <-
+  diabetes.for.bestglm_BIC[, c("gender","Race","Age","Discharge","Admission","time_in_hospital","Medical_speciality","Diagnosis",
+                           "y")]
+
+res.bestglm_BIC <- bestglm(diabetes.for.bestglm_BIC, family = binomial, IC = "BIC", t = "default",CVArgs = "default", qLevel = 0.99, TopModels = 5,method = "exhaustive", intercept = TRUE, weights = NULL,nvmax = "default", RequireFullEnumerationQ = FALSE)
+
+
+```
+
+After running the best subset selection using BIC criteria, the following predictors in the Table 4 are selected
+
+### Table 4 
+```{r,echo=FALSE}
+
+tab_model(res.bestglm_BIC$BestModel,transform=NULL,auto.label = F,show.ci = F) 
+
+```
+**Note: Log-Odds is the predictor parameter estimate**
+
+BIC criteria is a very parsimonious approach to variable selection. It imposes a higher penalty to a model with more variables
+
+Based on the BIC criteria, the individual explanatory variables which are important are Age,Diagnosis and time_in_hospital
+
+Next,we will check the significant interactions
+
+### Including the interactions
+
+The following code was used:
+
+```{r,echo=TRUE}
+
+model_interactions_BIC <- glm(Readmitted ~ Discharge + time_in_hospital + Age + HbA1C+ Discharge * time_in_hospital + Discharge * Age + time_in_hospital * Age + Discharge *HbA1C + time_in_hospital * HbA1C + Age * HbA1C , data = train, family = binomial)
+
+```
+
+The table below lists the parameter estimates and p-values for the model
+
+#### Table 4 and 5 combined
+```{r,echo=FALSE}
+
+tab_model(model_interactions_BIC,transform=NULL,auto.label = F,show.ci = F) 
+
+```
+
+Type II Chi-Square test is used to test the significance of each variable and interactions based on likelihood ratio test. It compares the ratio of deviance of model without the variable or interaction being tested to the deviance of the model including the variable or interaction being tested. A low p-value suggests that the variable or interactiob being tested has a significant effect on the model if it is removed. Therefore,it is important and should be kept in the model
+
+#### Type II Chi Square Test
+```{r,echo=FALSE}
+
+Anova(model_interactions_BIC)
+
+```
+
+It can be observed from the Type II chi-square test that only one interaction namely Discharge * time_in_hospital is significant(p-value<0.01)
+
+### Final model using BIC approach initially
+
+The below chunk of code is the final model which was made using the BIC criteria initially:
+
+```{r,echo=TRUE}
+
+Model_Final_BIC <- glm(Readmitted ~ Discharge + time_in_hospital + Age + HbA1C +Discharge * time_in_hospital, data = train, family = binomial)
+
+```
+
+The table below lists the parameter estimates and p-values for the final model made using the BIC criteria initially
+
+#### Table 4 and 5 combined
+```{r,echo=FALSE}
+
+tab_model(Model_Final_BIC,transform=NULL,auto.label = F,show.ci = F) 
+
+```
+
+Finally a Type II Chi-Square test was performed to confirm whether the fitted variables and interaction are significant 
+
+#### Type II Chi Square Test
+```{r,echo=FALSE}
+Anova(Model_Final_BIC)
+```
+
+All the fitted variables and interactions have a p-value<0.01 except HbA1C
+
+We will keep HbA1C in our model as we need to see the impact of HbA1C on readmission rates, keeping other significant co-variates in the logistic regression model
+
+Next, we will check how the fitted model performs on the test data
+
+## Cut-off to be used for each class
+
+Next we will check the cut-off values to be used based on the mean of each class
+
+The following result is obtained :
+
+```{r,echo=FALSE}
+x<- predict(Model_Final_BIC,type="response")
+summary(x)
+```
+
+A cut-off value of 0.09 is used for class 1 and 0.91 is used for class 0 based on the predicted means above for each class
+
+### Model Validation
+
+#### Plotting Area Under curve
+
+```{r,echo=FALSE}
+
+predicted_readmission_rate_BIC <- Model_Final_BIC %>%
+                                    augment(type.predict = "response", newdata = test) %>%
+                                    mutate(predicted = ifelse(.fitted > 0.09,1,0))
+
+roc <- roc(predicted_readmission_rate_BIC$predicted,test$Readmitted)
+auc(roc) 
+plot(roc)
+
+```
+
+The Area under curve is 52.51% which is approximately equal to the final model as per the citation paper(52.16%)
+
+#### Confusion matrix
+```{r,Matrix own,echo=FALSE}
+
+confusion_matrix_BIC <- table(predicted_readmission_rate_BIC$predicted,test$Readmitted)
+confusionMatrix(confusion_matrix_BIC,positive = "1")
+
+```
+
+
+Note: For each statistic below, I will compare it to the statistic in the final model as per the citation paper
+
+The Accuracy is 59.35%(vs 56.81%) whereas the Yuden Index is 0.152(vs 0.134)
+
+The Sensitivity is 55.51%(vs 57.09% ) which means that the model has a true positive rate of .5551(vs .5709) and Specificity is 59.72%(vs 56.79%) which means that the model has true negative rate equal to .5972 (vs 0.5679).The Yuden Index is still very low though it has improved slightly
+
+The model has predicted False positives for 7,714 (vs 8,275) observations and False negatives in 819 (vs 790) observations 
+
+Out of the 20,991 observations in test data,59.35%(vs 56.81%) of the observations have been predicted correctly as being Readmitted or not
+
+Overall, it is debatable whether this is sligthly improved model as compared to the model as per the citation paper.The odds of predicting readmission for this model is still low 
+
+# Random Forest
+
+A random forest classification model is made to predict the readmission rates.100 decision trees are made within the random forest. Same steps as above are followed for model validation of the random forest model
+
+The below chunk of code was run to model a random forest with 100 trees:
+
+```{r,echo=TRUE}
+
+random_forest <- randomForest(factor(Readmitted) ~ Discharge + Race + gender+ Admission + Medical_speciality + time_in_hospital + Age + Diagnosis + HbA1C, data = train, ntree = 100, importance = T)
+
+```
+
+A variable importance plot is made to access the importance of variables for the prediction of readmission through the random forest model above
+
+## Variable Importance Plot
+
+```{r,echo=FALSE}
+
+importance(random_forest, type = 1)
+varImpPlot(random_forest)
+```
+
+It can be seen from the variable importance plot above that removing gender,Race,HbA1C from the random forest model does not decrease the accuracy by much. However, a model without Race and gender make the predictions based on the random forest worse(model not included in the report). Therefore, they have been kept
+
+## Cut-off to be used for each class
+
+Next we will check the cut-off values to be used based on the mean of each class
+
+The following result is obtained :
+
+```{r,echo=FALSE}
+x<- predict(random_forest,type="prob")
+summary(x)
+```
+
+A cut-off value of 0.03 is used for class 1 and 0.97 is used for class 0 based on the predicted means above for each class
+
+# Random forest with cut-off
+
+The following chunk of code was used to make the random forest with a cut-off of 0.03 for class 1 and 0.97 for class 0 :
+
+```{r,echo=TRUE}
+random_forest_cutoff <- randomForest(factor(Readmitted) ~ Discharge + Race + gender+ Admission + Medical_speciality + time_in_hospital + Age + Diagnosis + HbA1C, data = train, ntree = 100, importance = T,cutoff=c(0.97,0.03))
+
+```
+
+## Model Validation
+
+### Plotting Area Under curve
+
+```{r,echo=FALSE}
+
+predicted_forest <- random_forest_cutoff %>%
+  predict(type = "prob", newdata = test)
+
+ROC_forest <- roc(test$Readmitted, predicted_forest[, 2])
+plot(ROC_forest)
+auc(ROC_forest)
+
+```
+
+The Area under curve is 52.65% which is slightly better than the AUC for the 2 models above
+
+### Confusion Matrix
+
+```{r,echo=FALSE}
+
+predictions = predict(random_forest_cutoff,newdata = test)
+summary(predictions)
+
+
+confusion_matrix_RF <- table(predictions,test$Readmitted)
+confusionMatrix(confusion_matrix_RF,positive = "1")
+```
+
+The Accuracy has increased considerably as compared to the 2 models above. However the increase in accuracy has come at a huge cost
+
+The sensitivity of the random forest is very low as compared to the 2 models above(31% vs around 56% for other two). Similarly, the Yuden Index has come down to 0.05 from 0.15 and 0.13
+
+The model is better at predicting the True negatives as compared to the regression models above. However the model is poor at predicting the True positives. This is evident from the Detection rate too(which has fallen from around 5% for regression models to 2.6% here)
+
+It can be concluded that although the accuracy and specificity of the model is high, it is poor at prediciting the positive value predicitions
+
+# Overall Conclusion
+
+It is observed from the logisitic regression that the p-value for HbA1C is high. It should be fair to conclude that HbA1C does not have a significant impact on the readmission rates.This can be seen through the Type II Chi-Square tests that have been performed on the Logistic regression model made by me(p-value=0.1394)
+
+The decision regarding which model is the best for predicting the readmission rates is debatable.It has been observed that the logisitic regression models are able to predict the True positives better,whereas the random forest is able to predict the True negatives better.Inherently, the class labels in the final dataset are imbalanced(class 0 has most of the observations).So the regression models and random forest have a lot of data for predicting the True negatives whereas the data is less for predicting the True positives.Maybe including more data for class label 1 or resampling the labels would help improve the model.
+
+Another potential reason for the model being less efficient at prediciting the readmission rates might be that the explanatory variables included in the model are not sufficient to explain the variation in the readmission rates.A robust analysis of including more potential explantory variables in the final model and testing them for significance might help in improving the model.
